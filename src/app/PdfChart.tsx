@@ -51,14 +51,20 @@ export function PdfChart({ pdfResult }: PdfChartProps) {
             (~{daysToExpiry} days)
           </p>
         </div>
-        <div className="flex items-center gap-2 text-xs">
+        <div className="flex flex-wrap items-center gap-2 text-xs">
           <span className="px-2 py-1 bg-red-50 text-red-700 rounded-md border border-red-200 font-medium">
             Spot: ${spotPrice.toFixed(2)}
           </span>
           <span className="px-2 py-1 bg-blue-50 text-blue-700 rounded-md border border-blue-200 font-medium">
-            Peak Q: ${maxQStrike.toFixed(2)}
+            E[Q]: ${pdfResult.expectedQ.toFixed(2)}
           </span>
           <span className="px-2 py-1 bg-emerald-50 text-emerald-700 rounded-md border border-emerald-200 font-medium">
+            E[P]: ${pdfResult.expectedP.toFixed(2)}
+          </span>
+          <span className="px-2 py-1 bg-gray-50 text-gray-700 rounded-md border border-gray-200 font-medium">
+            Peak Q: ${maxQStrike.toFixed(2)}
+          </span>
+          <span className="px-2 py-1 bg-gray-50 text-gray-700 rounded-md border border-gray-200 font-medium">
             Peak P: ${maxPStrike.toFixed(2)}
           </span>
         </div>

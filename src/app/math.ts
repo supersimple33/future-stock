@@ -105,6 +105,8 @@ export interface PdfResult {
   expiry: string;
   timeToExpiry: number;
   distribution: DensityPoint[];
+  expectedQ: number; // Risk-Neutral Expected Value: E^Q[S_T]
+  expectedP: number; // Physical Expected Value: E^P[S_T]
 }
 
 // Parses OCC symbol: TICKER + YYMMDD + [C|P] + STRIKE*1000
@@ -235,7 +237,7 @@ export function generatePricePdf(
   }
   const cleanP = applyDensitySmoothing(rawP);
 
-  // 6. Normalize both densities so integral == 1 (Trapezoidal Rule)
+  // 6. Normalize both densities so integral == 1 and compute expected values (Trapezoidal Rule)
   let qSum = 0;
   let pSum = 0;
   for (let i = 0; i < gridPoints - 1; i++) {
@@ -252,10 +254,27 @@ export function generatePricePdf(
     });
   }
 
+  // Calculate Expected Values: E[S_T] = integral(K * f(K) dK)
+  let expectedQ = 0;
+  let expectedP = 0;
+  for (let i = 0; i < gridPoints - 1; i++) {
+    const k0 = kGrid[i];
+    const k1 = kGrid[i + 1];
+    const q0 = distribution[i].qDensity;
+    const q1 = distribution[i + 1].qDensity;
+    const p0 = distribution[i].pDensity;
+    const p1 = distribution[i + 1].pDensity;
+
+    expectedQ += 0.5 * (k0 * q0 + k1 * q1) * step;
+    expectedP += 0.5 * (k0 * p0 + k1 * p1) * step;
+  }
+
   return {
     spotPrice: spot,
     expiry: targetExpiry,
     timeToExpiry: T,
     distribution,
+    expectedQ: Number(expectedQ.toFixed(2)),
+    expectedP: Number(expectedP.toFixed(2)),
   };
 }

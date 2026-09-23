@@ -223,6 +223,18 @@ export default function Home() {
               </span>
             </div>
             <div className="p-2 bg-white rounded border border-blue-100">
+              <span className="text-gray-500 block">Expected Value (Q)</span>
+              <span className="font-semibold text-blue-700">
+                ${pdfResult.expectedQ.toFixed(2)}
+              </span>
+            </div>
+            <div className="p-2 bg-white rounded border border-blue-100">
+              <span className="text-gray-500 block">Expected Value (P)</span>
+              <span className="font-semibold text-emerald-700">
+                ${pdfResult.expectedP.toFixed(2)}
+              </span>
+            </div>
+            <div className="p-2 bg-white rounded border border-blue-100">
               <span className="text-gray-500 block">Peak Mode (Q Density)</span>
               <span className="font-semibold text-blue-700">
                 ${peakStats.maxQStrike.toFixed(2)}
@@ -230,7 +242,7 @@ export default function Home() {
             </div>
             <div className="p-2 bg-white rounded border border-blue-100">
               <span className="text-gray-500 block">Peak Mode (P Density)</span>
-              <span className="font-semibold text-green-700">
+              <span className="font-semibold text-emerald-700">
                 ${peakStats.maxPStrike.toFixed(2)}
               </span>
             </div>
