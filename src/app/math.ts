@@ -32,66 +32,64 @@ function blackScholesCall(
   return S * normCdf(d1) - K * Math.exp(-r * T) * normCdf(d2);
 }
 
-// --- 2. Natural Cubic Spline for IV Smoothing ---
+// --- 2. Adaptive Volatility Smoothing Engine ---
 
-class NaturalCubicSpline {
-  private x: number[];
-  private a: number[];
-  private b: number[];
-  private c: number[];
-  private d: number[];
+/**
+ * Evaluates implied volatility using a Gaussian kernel smoother over strike prices.
+ * Unlike an interpolating cubic spline, kernel smoothing avoids high-frequency
+ * oscillations in the second derivative (which cause butterfly arbitrage violations
+ * and jagged zero-clamping in Breeden-Litzenberger density extraction).
+ */
+function evaluateSmoothedIv(
+  targetStrike: number,
+  strikes: number[],
+  ivs: number[],
+  bandwidth: number,
+): number {
+  let sumWeight = 0;
+  let sumWeightedIv = 0;
 
-  constructor(x: number[], y: number[]) {
-    this.x = [...x];
-    this.a = [...y];
-    const n = x.length - 1;
-    const h = new Array(n);
-    for (let i = 0; i < n; i++) h[i] = x[i + 1] - x[i];
-
-    const alpha = new Array(n).fill(0);
-    for (let i = 1; i < n; i++) {
-      alpha[i] =
-        (3 / h[i]) * (this.a[i + 1] - this.a[i]) -
-        (3 / h[i - 1]) * (this.a[i] - this.a[i - 1]);
-    }
-
-    const l = new Array(n + 1).fill(1);
-    const mu = new Array(n + 1).fill(0);
-    const z = new Array(n + 1).fill(0);
-    this.c = new Array(n + 1).fill(0);
-    this.b = new Array(n).fill(0);
-    this.d = new Array(n).fill(0);
-
-    for (let i = 1; i < n; i++) {
-      l[i] = 2 * (x[i + 1] - x[i - 1]) - h[i - 1] * mu[i - 1];
-      mu[i] = h[i] / l[i];
-      z[i] = (alpha[i] - h[i - 1] * z[i - 1]) / l[i];
-    }
-
-    for (let j = n - 1; j >= 0; j--) {
-      this.c[j] = z[j] - mu[j] * this.c[j + 1];
-      this.b[j] =
-        (this.a[j + 1] - this.a[j]) / h[j] -
-        (h[j] * (this.c[j + 1] + 2 * this.c[j])) / 3;
-      this.d[j] = (this.c[j + 1] - this.c[j]) / (3 * h[j]);
-    }
+  for (let i = 0; i < strikes.length; i++) {
+    const d = (targetStrike - strikes[i]) / bandwidth;
+    // Gaussian kernel weight
+    const weight = Math.exp(-0.5 * d * d);
+    sumWeight += weight;
+    sumWeightedIv += weight * ivs[i];
   }
 
-  evaluate(val: number): number {
-    const n = this.x.length;
-    if (val <= this.x[0]) return this.a[0];
-    if (val >= this.x[n - 1]) return this.a[n - 1];
+  if (sumWeight <= 0) return ivs[0];
+  const smoothed = sumWeightedIv / sumWeight;
+  // Floor and cap IV to reasonable boundaries
+  return Math.max(0.05, Math.min(3.0, smoothed));
+}
 
-    let i = 0;
-    while (i < n - 1 && val > this.x[i + 1]) i++;
-    const dx = val - this.x[i];
-    return (
-      this.a[i] +
-      this.b[i] * dx +
-      this.c[i] * dx * dx +
-      this.d[i] * dx * dx * dx
-    );
+/**
+ * 5-point discrete Gaussian smoothing filter to clean finite-difference noise.
+ */
+function applyDensitySmoothing(data: Float64Array): Float64Array {
+  const n = data.length;
+  const smoothed = new Float64Array(n);
+  // Normalized 5-tap Gaussian weights (sigma ~= 1.0)
+  const weights = [0.06136, 0.24477, 0.38774, 0.24477, 0.06136];
+  const half = 2;
+
+  for (let i = 0; i < n; i++) {
+    let wSum = 0;
+    let valSum = 0;
+
+    for (let j = -half; j <= half; j++) {
+      const idx = i + j;
+      if (idx >= 0 && idx < n) {
+        const w = weights[j + half];
+        wSum += w;
+        valSum += w * data[idx];
+      }
+    }
+
+    smoothed[i] = wSum > 0 ? Math.max(0, valSum / wSum) : data[i];
   }
+
+  return smoothed;
 }
 
 // --- 3. Density Construction Engine ---
@@ -124,7 +122,7 @@ export function generatePricePdf(
   const {
     riskFreeRate = 0.045,
     riskAversion = 2.5,
-    gridPoints = 400,
+    gridPoints = 250,
   } = options;
   const spot = payload.data.current_price;
 
@@ -137,49 +135,71 @@ export function generatePricePdf(
   );
   const T = diffDays / 365.25;
 
-  // 2. Parse, filter, and extract calls for the selected expiry
-  const validContracts: { strike: number; iv: number }[] = [];
+  // 2. Parse and filter options: prioritize liquid Out-Of-The-Money (OTM) contracts
+  // OTM Puts for K < spot, OTM Calls for K >= spot have the highest open interest
+  // and cleanest IV quotes, eliminating noise from wide ITM spreads.
+  type ContractCandidate = {
+    strike: number;
+    iv: number;
+    isOtm: boolean;
+    oi: number;
+  };
+
+  const strikeMap = new Map<number, ContractCandidate>();
 
   for (const opt of payload.data.options) {
     const match = opt.option.match(OCC_REGEX);
     if (!match) continue;
 
-    const [, , yy, mm, dd, _side, strikeStr] = match;
+    const [, , yy, mm, dd, side, strikeStr] = match;
     const optExpiry = `20${yy}-${mm}-${dd}`;
     if (optExpiry !== targetExpiry) continue;
 
     const strike = parseInt(strikeStr, 10) / 1000;
 
-    // Filter liquid, reliable strikes: has positive IV, positive bid, and reasonable strike band
-    if (
-      opt.iv > 0.01 &&
-      opt.bid > 0 &&
-      strike >= spot * 0.5 &&
-      strike <= spot * 1.6
-    ) {
-      validContracts.push({ strike, iv: opt.iv });
+    // Strike band: focus on liquid range around spot (40% to 180%)
+    if (strike < spot * 0.4 || strike > spot * 1.8) continue;
+    if (opt.iv <= 0.01 || opt.bid <= 0) continue;
+
+    const isOtm =
+      (strike < spot && side === "P") || (strike >= spot && side === "C");
+    const candidate: ContractCandidate = {
+      strike,
+      iv: opt.iv,
+      isOtm,
+      oi: opt.open_interest,
+    };
+
+    const existing = strikeMap.get(strike);
+    if (!existing) {
+      strikeMap.set(strike, candidate);
+    } else {
+      // Prioritize OTM contract; if both or neither are OTM, choose higher open interest
+      if (!existing.isOtm && isOtm) {
+        strikeMap.set(strike, candidate);
+      } else if (existing.isOtm === isOtm && candidate.oi > existing.oi) {
+        strikeMap.set(strike, candidate);
+      }
     }
   }
 
-  // Deduplicate and sort by strike
-  const sorted = Array.from(
-    new Map(validContracts.map((c) => [c.strike, c.iv])).entries(),
-  )
-    .map(([strike, iv]) => ({ strike, iv }))
-    .sort((a, b) => a.strike - b.strike);
+  const sorted = Array.from(strikeMap.values()).sort(
+    (a, b) => a.strike - b.strike,
+  );
 
   if (sorted.length < 5) {
     throw new Error(
-      `Insufficient strikes (${sorted.length}) to interpolate an implied volatility curve.`,
+      `Insufficient valid strikes (${sorted.length}) for expiry ${targetExpiry}.`,
     );
   }
 
-  // 3. Fit Natural Cubic Spline to the Volatility Smile
   const strikes = sorted.map((s) => s.strike);
   const ivs = sorted.map((s) => s.iv);
-  const ivSpline = new NaturalCubicSpline(strikes, ivs);
 
-  // 4. Generate dense grid and reprice calls via Black-Scholes
+  // Bandwidth for Gaussian kernel: proportional to spot (~5-7% of spot)
+  const bandwidth = Math.max(2, spot * 0.06);
+
+  // 3. Generate dense grid and reprice calls via Black-Scholes
   const minK = strikes[0];
   const maxK = strikes[strikes.length - 1];
   const step = (maxK - minK) / (gridPoints - 1);
@@ -189,43 +209,46 @@ export function generatePricePdf(
 
   for (let i = 0; i < gridPoints; i++) {
     const k = minK + i * step;
-    const smoothedIv = Math.max(0.02, Math.min(3.0, ivSpline.evaluate(k)));
+    const smoothedIv = evaluateSmoothedIv(k, strikes, ivs, bandwidth);
     kGrid[i] = k;
     cGrid[i] = blackScholesCall(spot, k, T, riskFreeRate, smoothedIv);
   }
 
-  // 5. Breeden-Litzenberger Numerical Second Derivative (Q-Density)
+  // 4. Breeden-Litzenberger Numerical Second Derivative (Q-Density)
   const discountFactor = Math.exp(riskFreeRate * T);
   const rawQ = new Float64Array(gridPoints);
 
   for (let i = 1; i < gridPoints - 1; i++) {
-    // Second central difference: (C[i+1] - 2*C[i] + C[i-1]) / deltaK^2
     const d2C = (cGrid[i + 1] - 2 * cGrid[i] + cGrid[i - 1]) / (step * step);
     rawQ[i] = Math.max(0, discountFactor * d2C);
   }
   rawQ[0] = rawQ[1];
   rawQ[gridPoints - 1] = rawQ[gridPoints - 2];
 
-  // 6. Compute Physical P-Density via CRRA Pricing Kernel: p(K) = q(K) * K^gamma
+  // Apply smoothing filter to eliminate any discrete differentiation noise
+  const cleanQ = applyDensitySmoothing(rawQ);
+
+  // 5. Compute Physical P-Density via CRRA Pricing Kernel: p(K) = q(K) * (K / spot)^gamma
   const rawP = new Float64Array(gridPoints);
   for (let i = 0; i < gridPoints; i++) {
-    rawP[i] = rawQ[i] * kGrid[i] ** riskAversion;
+    rawP[i] = cleanQ[i] * (kGrid[i] / spot) ** riskAversion;
   }
+  const cleanP = applyDensitySmoothing(rawP);
 
-  // 7. Normalize both densities so integral == 1 (Trapezoidal Rule)
+  // 6. Normalize both densities so integral == 1 (Trapezoidal Rule)
   let qSum = 0;
   let pSum = 0;
   for (let i = 0; i < gridPoints - 1; i++) {
-    qSum += 0.5 * (rawQ[i] + rawQ[i + 1]) * step;
-    pSum += 0.5 * (rawP[i] + rawP[i + 1]) * step;
+    qSum += 0.5 * (cleanQ[i] + cleanQ[i + 1]) * step;
+    pSum += 0.5 * (cleanP[i] + cleanP[i + 1]) * step;
   }
 
   const distribution: DensityPoint[] = [];
   for (let i = 0; i < gridPoints; i++) {
     distribution.push({
       strike: Number(kGrid[i].toFixed(2)),
-      qDensity: qSum > 0 ? rawQ[i] / qSum : 0,
-      pDensity: pSum > 0 ? rawP[i] / pSum : 0,
+      qDensity: qSum > 0 ? cleanQ[i] / qSum : 0,
+      pDensity: pSum > 0 ? cleanP[i] / pSum : 0,
     });
   }
 
