@@ -1,13 +1,12 @@
 import { type OptionDataResponse, OptionDataResponseSchema } from "./models";
 
-const BASE_URL = process.env.NEXT_PUBLIC_BASE_URL;
-const ENDPOINT = "/api/stock/global/delayed_quotes/options";
+const API_URL = process.env.NEXT_PUBLIC_API_URL;
 
 export async function fetchOptionsData(
   symbol: string,
 ): Promise<OptionDataResponse> {
   const upperSymbol = symbol.toUpperCase().trim();
-  const url = `${BASE_URL}${ENDPOINT}/${upperSymbol}.json`;
+  const url = `${API_URL}/cboe/options/${upperSymbol}.json`;
 
   const response = await fetch(url);
   if (!response.ok) {
