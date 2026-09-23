@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import { fetchOptionsData } from "./data";
 import { generatePricePdf, type PdfResult } from "./math";
 import type { OptionDataResponse } from "./models";
+import { PdfChart } from "./PdfChart";
 
 const OCC_REGEX = /^([A-Z\s]{1,6})(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/;
 
@@ -111,7 +112,7 @@ export default function Home() {
   }, [pdfResult]);
 
   return (
-    <main className="p-8 max-w-md mx-auto space-y-6">
+    <main className="p-8 max-w-2xl mx-auto space-y-6">
       <h1 className="text-xl font-bold text-gray-900">Options PDF Analyzer</h1>
 
       {/* Step 1: Symbol Input */}
@@ -185,7 +186,10 @@ export default function Home() {
         </div>
       )}
 
-      {/* PDF Summary Data (Printed details, no chart) */}
+      {/* PDF Chart Rendering */}
+      {pdfResult && <PdfChart pdfResult={pdfResult} />}
+
+      {/* PDF Summary Data */}
       {pdfResult && peakStats && (
         <div className="p-4 bg-blue-50 border border-blue-200 rounded-md text-blue-950 space-y-2">
           <span className="text-xs font-semibold text-blue-700 uppercase tracking-wider block">
