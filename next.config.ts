@@ -7,7 +7,7 @@ const nextConfig: NextConfig = {
     return [
       {
         source: "/api/cboe/:path*",
-        destination: "https://cdn.cboe.com/api/global/delayed_quotes/:path*",
+        destination: "https://cdn-api.cboe.com/api/global/delayed_quotes/:path*",
       },
     ];
   },
