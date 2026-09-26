@@ -55,8 +55,16 @@ export function PdfChart({ pdfResult }: PdfChartProps) {
           <span className="px-2 py-1 bg-red-50 text-red-700 rounded-md border border-red-200 font-medium">
             Spot: ${spotPrice.toFixed(2)}
           </span>
+          {pdfResult.impliedForward && (
+            <span className="px-2 py-1 bg-amber-50 text-amber-800 rounded-md border border-amber-200 font-medium">
+              F: ${pdfResult.impliedForward.toFixed(2)}
+            </span>
+          )}
           <span className="px-2 py-1 bg-purple-50 text-purple-700 rounded-md border border-purple-200 font-medium">
             r: {(pdfResult.riskFreeRate * 100).toFixed(1)}%
+          </span>
+          <span className="px-2 py-1 bg-indigo-50 text-indigo-700 rounded-md border border-indigo-200 font-medium">
+            q: {(pdfResult.dividendYield * 100).toFixed(1)}%
           </span>
           <span className="px-2 py-1 bg-blue-50 text-blue-700 rounded-md border border-blue-200 font-medium">
             E[Q]: ${pdfResult.expectedQ.toFixed(2)}

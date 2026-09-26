@@ -2,7 +2,12 @@
 
 import { useMemo, useState } from "react";
 import { fetchOptionsData } from "./data";
-import { generatePricePdf, type PdfResult } from "./math";
+import {
+  extractImpliedDividend,
+  generatePricePdf,
+  type ImpliedDividendResult,
+  type PdfResult,
+} from "./math";
 import type { OptionDataResponse } from "./models";
 import { PdfChart } from "./PdfChart";
 
@@ -13,6 +18,9 @@ export default function Home() {
   const [activeSymbol, setActiveSymbol] = useState("");
   const [selectedDate, setSelectedDate] = useState("");
   const [rateInput, setRateInput] = useState("4.5");
+  const [dividendInput, setDividendInput] = useState("0.0");
+  const [impliedDividend, setImpliedDividend] =
+    useState<ImpliedDividendResult | null>(null);
   const [optionsData, setOptionsData] = useState<OptionDataResponse | null>(
     null,
   );
@@ -38,6 +46,7 @@ export default function Home() {
     data: OptionDataResponse,
     expiry: string,
     rateStr: string,
+    divStr: string,
   ) => {
     if (!expiry) {
       setPdfResult(null);
@@ -46,9 +55,14 @@ export default function Home() {
 
     const parsedRate = parseFloat(rateStr);
     const r = Number.isFinite(parsedRate) ? parsedRate / 100 : 0.045;
+    const parsedDiv = parseFloat(divStr);
+    const q = Number.isFinite(parsedDiv) ? parsedDiv / 100 : 0.0;
 
     try {
-      const pdf = generatePricePdf(data, expiry, { riskFreeRate: r });
+      const pdf = generatePricePdf(data, expiry, {
+        riskFreeRate: r,
+        dividendYield: q,
+      });
       setPdfResult(pdf);
       setError(null);
     } catch (err) {
@@ -72,6 +86,8 @@ export default function Home() {
     setPdfResult(null);
     setSelectedDate("");
     setOptionsData(null);
+    setImpliedDividend(null);
+    setDividendInput("0.0");
 
     try {
       const data = await fetchOptionsData(symbol);
@@ -90,13 +106,50 @@ export default function Home() {
   const handleSelectExpiry = (expiry: string) => {
     setSelectedDate(expiry);
     if (!optionsData) return;
-    computePdf(optionsData, expiry, rateInput);
+
+    const parsedRate = parseFloat(rateInput);
+    const r = Number.isFinite(parsedRate) ? parsedRate / 100 : 0.045;
+    const extracted = extractImpliedDividend(optionsData, expiry, r);
+    setImpliedDividend(extracted);
+
+    // Auto-populate dividend input if currently zero or empty
+    let divToUse = dividendInput;
+    if (
+      extracted &&
+      (dividendInput === "0.0" || dividendInput === "0" || dividendInput === "")
+    ) {
+      const divPct = (extracted.impliedDividendYield * 100).toFixed(2);
+      setDividendInput(divPct);
+      divToUse = divPct;
+    }
+
+    computePdf(optionsData, expiry, rateInput, divToUse);
   };
 
   const handleRateChange = (newRate: string) => {
     setRateInput(newRate);
     if (optionsData && selectedDate) {
-      computePdf(optionsData, selectedDate, newRate);
+      const parsedRate = parseFloat(newRate);
+      const r = Number.isFinite(parsedRate) ? parsedRate / 100 : 0.045;
+      const extracted = extractImpliedDividend(optionsData, selectedDate, r);
+      setImpliedDividend(extracted);
+      computePdf(optionsData, selectedDate, newRate, dividendInput);
+    }
+  };
+
+  const handleDividendChange = (newDiv: string) => {
+    setDividendInput(newDiv);
+    if (optionsData && selectedDate) {
+      computePdf(optionsData, selectedDate, rateInput, newDiv);
+    }
+  };
+
+  const handleApplyImpliedDividend = () => {
+    if (!impliedDividend) return;
+    const divPct = (impliedDividend.impliedDividendYield * 100).toFixed(2);
+    setDividendInput(divPct);
+    if (optionsData && selectedDate) {
+      computePdf(optionsData, selectedDate, rateInput, divPct);
     }
   };
 
@@ -249,6 +302,22 @@ export default function Home() {
                   </span>
                 </div>
                 <div className="p-2 bg-white rounded border border-blue-100">
+                  <span className="text-gray-500 block">
+                    Dividend Yield (q)
+                  </span>
+                  <span className="font-semibold text-indigo-700">
+                    {(pdfResult.dividendYield * 100).toFixed(2)}%
+                  </span>
+                </div>
+                <div className="p-2 bg-white rounded border border-blue-100">
+                  <span className="text-gray-500 block">
+                    Implied Forward (F)
+                  </span>
+                  <span className="font-semibold text-amber-700">
+                    ${pdfResult.impliedForward.toFixed(2)}
+                  </span>
+                </div>
+                <div className="p-2 bg-white rounded border border-blue-100">
                   <span className="text-gray-500 block">Strike Range</span>
                   <span className="font-semibold text-gray-900">
                     ${peakStats.minStrike} - ${peakStats.maxStrike} (
@@ -326,6 +395,72 @@ export default function Home() {
               <p className="mt-1 text-[11px] text-gray-400">
                 Annual rate (defaults to 4.5%)
               </p>
+            </div>
+
+            {/* Dividend Yield Parameter Input & Market-Implied Parity Detection */}
+            <div className="pt-2 border-t border-gray-100 space-y-2">
+              <div className="flex items-center justify-between">
+                <label
+                  htmlFor="sidebar-div-input"
+                  className="block text-xs font-medium text-gray-700"
+                >
+                  Dividend Yield (q)
+                </label>
+                {impliedDividend && (
+                  <button
+                    type="button"
+                    onClick={handleApplyImpliedDividend}
+                    className="text-[10px] font-semibold text-blue-600 hover:text-blue-800 bg-blue-50 hover:bg-blue-100 border border-blue-200 px-1.5 py-0.5 rounded transition cursor-pointer"
+                    title="Auto-fill with Put-Call Parity implied dividend yield"
+                  >
+                    Use Implied
+                  </button>
+                )}
+              </div>
+              <div className="relative">
+                <input
+                  id="sidebar-div-input"
+                  type="number"
+                  step="0.1"
+                  min="-20"
+                  max="100"
+                  value={dividendInput}
+                  onChange={(e) => handleDividendChange(e.target.value)}
+                  placeholder="0.0"
+                  className="w-full px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 pr-8 font-medium"
+                />
+                <span className="absolute right-3 top-1.5 text-sm text-gray-400 font-medium">
+                  %
+                </span>
+              </div>
+
+              {impliedDividend ? (
+                <div className="text-[11px] text-gray-500 bg-gray-50 p-2 rounded border border-gray-100 space-y-1">
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">Market-Implied q:</span>
+                    <span className="font-semibold text-gray-800">
+                      {(impliedDividend.impliedDividendYield * 100).toFixed(2)}%
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">Implied Forward (F):</span>
+                    <span className="font-semibold text-amber-700">
+                      ${impliedDividend.impliedForwardPrice.toFixed(2)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-gray-400 text-[10px] pt-0.5 border-t border-gray-100">
+                    <span>ATM Strike: ${impliedDividend.atmStrike}</span>
+                    <span>
+                      C: ${impliedDividend.callMid} / P: $
+                      {impliedDividend.putMid}
+                    </span>
+                  </div>
+                </div>
+              ) : (
+                <p className="text-[11px] text-gray-400">
+                  Continuous annual yield (defaults to 0%)
+                </p>
+              )}
             </div>
 
             {/* Visual Legend */}
