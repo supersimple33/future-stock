@@ -107,6 +107,7 @@ export interface PdfResult {
   distribution: DensityPoint[];
   expectedQ: number; // Risk-Neutral Expected Value: E^Q[S_T]
   expectedP: number; // Physical Expected Value: E^P[S_T]
+  riskFreeRate: number; // Applied annual risk-free rate (e.g. 0.045 for 4.5%)
 }
 
 // Parses OCC symbol: TICKER + YYMMDD + [C|P] + STRIKE*1000
@@ -276,5 +277,6 @@ export function generatePricePdf(
     distribution,
     expectedQ: Number(expectedQ.toFixed(2)),
     expectedP: Number(expectedP.toFixed(2)),
+    riskFreeRate,
   };
 }
