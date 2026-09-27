@@ -24,12 +24,16 @@ function blackScholesCall(
   T: number,
   r: number,
   sigma: number,
+  q = 0,
 ): number {
   if (T <= 0 || sigma <= 0) return Math.max(0, S - K);
   const d1 =
-    (Math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * Math.sqrt(T));
+    (Math.log(S / K) + (r - q + 0.5 * sigma * sigma) * T) /
+    (sigma * Math.sqrt(T));
   const d2 = d1 - sigma * Math.sqrt(T);
-  return S * normCdf(d1) - K * Math.exp(-r * T) * normCdf(d2);
+  return (
+    S * Math.exp(-q * T) * normCdf(d1) - K * Math.exp(-r * T) * normCdf(d2)
+  );
 }
 
 // --- 2. Adaptive Volatility Smoothing Engine ---
@@ -108,6 +112,8 @@ export interface PdfResult {
   expectedQ: number; // Risk-Neutral Expected Value: E^Q[S_T]
   expectedP: number; // Physical Expected Value: E^P[S_T]
   riskFreeRate: number; // Applied annual risk-free rate (e.g. 0.045 for 4.5%)
+  dividendYield: number; // Applied annual continuous dividend yield (e.g. 0.013 for 1.3%)
+  impliedForward: number; // Implied Forward Price: F = S * exp((r - q) * T)
 }
 
 // Parses OCC symbol: TICKER + YYMMDD + [C|P] + STRIKE*1000
@@ -118,12 +124,14 @@ export function generatePricePdf(
   targetExpiry: string, // format: "YYYY-MM-DD"
   options: {
     riskFreeRate?: number; // r: e.g., 0.045 (4.5%)
+    dividendYield?: number; // q: e.g., 0.013 (1.3%)
     riskAversion?: number; // gamma: 0 = risk-neutral, 2-4 = empirical market average
     gridPoints?: number; // Evaluation resolution
   } = {},
 ): PdfResult {
   const {
     riskFreeRate = 0.045,
+    dividendYield = 0.0,
     riskAversion = 2.5,
     gridPoints = 250,
   } = options;
@@ -214,7 +222,14 @@ export function generatePricePdf(
     const k = minK + i * step;
     const smoothedIv = evaluateSmoothedIv(k, strikes, ivs, bandwidth);
     kGrid[i] = k;
-    cGrid[i] = blackScholesCall(spot, k, T, riskFreeRate, smoothedIv);
+    cGrid[i] = blackScholesCall(
+      spot,
+      k,
+      T,
+      riskFreeRate,
+      smoothedIv,
+      dividendYield,
+    );
   }
 
   // 4. Breeden-Litzenberger Numerical Second Derivative (Q-Density)
@@ -270,6 +285,8 @@ export function generatePricePdf(
     expectedP += 0.5 * (k0 * p0 + k1 * p1) * step;
   }
 
+  const impliedForward = spot * Math.exp((riskFreeRate - dividendYield) * T);
+
   return {
     spotPrice: spot,
     expiry: targetExpiry,
@@ -278,5 +295,118 @@ export function generatePricePdf(
     expectedQ: Number(expectedQ.toFixed(2)),
     expectedP: Number(expectedP.toFixed(2)),
     riskFreeRate,
+    dividendYield,
+    impliedForward: Number(impliedForward.toFixed(2)),
+  };
+}
+
+// --- 4. Market-Implied Forward & Dividend Yield Extraction ---
+
+export interface ImpliedDividendResult {
+  impliedDividendYield: number; // Annualized continuous dividend yield (e.g. 0.013 for 1.3%)
+  impliedForwardPrice: number; // Market-implied forward price F
+  atmStrike: number; // Strike used for extraction
+  callMid: number; // Mid price of ATM Call
+  putMid: number; // Mid price of ATM Put
+}
+
+/**
+ * Extracts the market-implied dividend yield (q) and forward price (F)
+ * directly from option chain market quotes using European Put-Call Parity:
+ *   C(K) - P(K) = exp(-r*T) * (F - K)
+ *   => F = K + exp(r*T) * (C - P)
+ *   => q = r - ln(F / S) / T
+ */
+export function extractImpliedDividend(
+  payload: OptionDataResponse,
+  targetExpiry: string,
+  riskFreeRate = 0.045,
+): ImpliedDividendResult | null {
+  const spot = payload.data.current_price;
+  if (!spot || spot <= 0) return null;
+
+  const quoteDate = new Date(payload.timestamp);
+  const expiryDate = new Date(`${targetExpiry}T20:00:00Z`);
+  const diffDays = Math.max(
+    1,
+    (expiryDate.getTime() - quoteDate.getTime()) / (1000 * 60 * 60 * 24),
+  );
+  const T = diffDays / 365.25;
+  if (T <= 0) return null;
+
+  // Map strikes to { call?: OptionData, put?: OptionData }
+  const pairMap = new Map<
+    number,
+    {
+      call?: (typeof payload.data.options)[number];
+      put?: (typeof payload.data.options)[number];
+    }
+  >();
+
+  for (const opt of payload.data.options) {
+    const match = opt.option.match(OCC_REGEX);
+    if (!match) continue;
+
+    const [, , yy, mm, dd, side, strikeStr] = match;
+    const optExpiry = `20${yy}-${mm}-${dd}`;
+    if (optExpiry !== targetExpiry) continue;
+
+    const strike = parseInt(strikeStr, 10) / 1000;
+    const pair = pairMap.get(strike) ?? {};
+    if (side === "C") {
+      pair.call = opt;
+    } else if (side === "P") {
+      pair.put = opt;
+    }
+    pairMap.set(strike, pair);
+  }
+
+  // Find candidate pairs with active, valid bid/ask quotes
+  const validPairs: {
+    strike: number;
+    diffFromSpot: number;
+    callMid: number;
+    putMid: number;
+  }[] = [];
+
+  for (const [strike, { call, put }] of pairMap.entries()) {
+    if (!call || !put) continue;
+    if (call.bid <= 0 || call.ask <= 0 || put.bid <= 0 || put.ask <= 0) {
+      continue;
+    }
+    if (call.ask < call.bid || put.ask < put.bid) continue;
+
+    const callMid = (call.bid + call.ask) / 2;
+    const putMid = (put.bid + put.ask) / 2;
+
+    validPairs.push({
+      strike,
+      diffFromSpot: Math.abs(strike - spot),
+      callMid,
+      putMid,
+    });
+  }
+
+  if (validPairs.length === 0) return null;
+
+  // Sort by proximity to spot (closest to ATM)
+  validPairs.sort((a, b) => a.diffFromSpot - b.diffFromSpot);
+
+  // Take the closest ATM pair
+  const best = validPairs[0];
+  const discountFactor = Math.exp(riskFreeRate * T);
+  const impliedForward =
+    best.strike + discountFactor * (best.callMid - best.putMid);
+
+  if (impliedForward <= 0) return null;
+
+  const impliedDividend = riskFreeRate - Math.log(impliedForward / spot) / T;
+
+  return {
+    impliedDividendYield: Number(impliedDividend.toFixed(4)),
+    impliedForwardPrice: Number(impliedForward.toFixed(2)),
+    atmStrike: best.strike,
+    callMid: Number(best.callMid.toFixed(2)),
+    putMid: Number(best.putMid.toFixed(2)),
   };
 }
